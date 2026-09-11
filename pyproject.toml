@@ -1,0 +1,17 @@
+[project]
+name = "python-chat-igortrajic"
+version = "0.1.0"
+description = "python tcp chat"
+readme = "README.md"
+authors = [
+    { name = "igortrajic", email = "iggetrajic@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+python-chat-igortrajic = "python_chat_igortrajic:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
