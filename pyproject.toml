@@ -7,7 +7,9 @@ authors = [
     { name = "igortrajic", email = "iggetrajic@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "rich>=15.0.0",
+]
 
 [project.scripts]
 python-chat-igortrajic = "python_chat_igortrajic:main"
@@ -15,3 +17,8 @@ python-chat-igortrajic = "python_chat_igortrajic:main"
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.7",
+]
