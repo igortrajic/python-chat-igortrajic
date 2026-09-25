@@ -7,15 +7,18 @@ import sys
 def receive_messages(client_socket):
     """Listens for incoming messages from the server."""
     decoder = codecs.getincrementaldecoder('utf-8')()
+    buffer = ""
     while True:
         try:
             data = client_socket.recv(1024)
             if not data:
                 print("Connection closed by the server.")
                 break
-            message = decoder.decode(data)
-            if message:
-                print(message)
+            buffer += decoder.decode(data)
+            while "\n" in buffer:
+                message, buffer = buffer.split("\n", 1)
+                if message:
+                    print(message)
         except ConnectionError:
             print("Connection to the server was lost.")
             break
@@ -47,7 +50,7 @@ def main():
             message = input()
             if not message:
                 continue
-            client_socket.sendall(message.encode('utf-8'))
+            client_socket.sendall((message + "\n").encode('utf-8'))
     except (KeyboardInterrupt, EOFError, OSError):
         pass
     finally:
