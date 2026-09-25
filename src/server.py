@@ -96,9 +96,6 @@ def handle_client(client_socket, address):
                 buffer += decoder.decode(data)
             except UnicodeDecodeError:
                 break
-            if len(buffer) > MAX_LINE_LENGTH:
-                console.print(f"[bold red]Message from {address} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
-                break
             while "\n" in buffer:
                 message, buffer = buffer.split("\n", 1)
                 message = sanitize(message)
@@ -106,6 +103,9 @@ def handle_client(client_socket, address):
                     continue
                 console.print(f"{address}: {escape(message)}")
                 broadcast(f"{address}: {message}", exclude=client_socket)
+            if len(buffer) > MAX_LINE_LENGTH:
+                console.print(f"[bold red]Message from {address} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
+                break
 
     finally:
         stop_event.set()
