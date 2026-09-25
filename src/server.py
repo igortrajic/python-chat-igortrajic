@@ -89,9 +89,27 @@ def read_username(client_socket, address, decoder, out_queue):
             elapsed = 0
 
         raw_username, buffer = buffer.split("\n", 1)
-        requested = sanitize(raw_username).strip()[:MAX_USERNAME_LENGTH]
-        if not requested:
-            requested = str(address)
+        entered = raw_username.strip()
+        sanitized = sanitize(entered)
+
+        rejection = None
+        if not entered:
+            rejection = "Username cannot be empty."
+        elif sanitized != entered:
+            rejection = "Username contains disallowed control characters."
+        elif len(sanitized) > MAX_USERNAME_LENGTH:
+            rejection = f"Username must be at most {MAX_USERNAME_LENGTH} characters."
+
+        if rejection is not None:
+            try:
+                client_socket.sendall(f"USERNAME_INVALID:{rejection}\n".encode('utf-8'))
+            except OSError:
+                return None, buffer
+            continue
+
+        # sanitized == entered here, so registering it can't silently
+        # change the identity the client asked for.
+        requested = sanitized
 
         with clients_lock:
             taken = any(info.username == requested for info in clients.values())
@@ -108,7 +126,7 @@ def read_username(client_socket, address, decoder, out_queue):
             continue
 
         try:
-            client_socket.sendall(b"USERNAME_OK\n")
+            client_socket.sendall(f"USERNAME_OK:{requested}\n".encode('utf-8'))
         except OSError:
             with clients_lock:
                 clients.pop(client_socket, None)
@@ -131,27 +149,35 @@ def handle_client(client_socket, address):
         connection_slots.release()
         return
 
-    console.print(f"[bold cyan]{address} identified as '{username}'[/bold cyan]")
+    safe_username = escape(username)
 
     stop_event = threading.Event()
-    broadcast(f"[{username}] has joined the chat.", exclude=client_socket)
-
-    writer = threading.Thread(
-        target=writer_loop,
-        args=(client_socket, address, out_queue, stop_event),
-        daemon=True,
-    )
-    writer.start()
-
-    idle_elapsed = 0
     try:
+        console.print(f"[bold cyan]{address} identified as '{safe_username}'[/bold cyan]")
+        broadcast(f"[{username}] has joined the chat.", exclude=client_socket)
+
+        writer = threading.Thread(
+            target=writer_loop,
+            args=(client_socket, address, out_queue, stop_event),
+            daemon=True,
+        )
+        writer.start()
+
+        while "\n" in buffer:
+            message, buffer = buffer.split("\n", 1)
+            message = sanitize(message)
+            if message:
+                console.print(f"[{safe_username}]: {escape(message)}")
+                broadcast(f"[{username}]: {message}", exclude=client_socket)
+
+        idle_elapsed = 0
         while not stop_event.is_set():
             try:
                 data = client_socket.recv(1024)
             except socket.timeout:
                 idle_elapsed += SOCKET_TIMEOUT
                 if idle_elapsed >= IDLE_TIMEOUT:
-                    console.print(f"[bold yellow]Connection from {address} ({username}) timed out (idle).[/bold yellow]")
+                    console.print(f"[bold yellow]Connection from {address} ({safe_username}) timed out (idle).[/bold yellow]")
                     break
                 continue
             except (ConnectionError, OSError):
@@ -168,10 +194,10 @@ def handle_client(client_socket, address):
                 message = sanitize(message)
                 if not message:
                     continue
-                console.print(f"[{username}]: {escape(message)}")
+                console.print(f"[{safe_username}]: {escape(message)}")
                 broadcast(f"[{username}]: {message}", exclude=client_socket)
             if len(buffer) > MAX_LINE_LENGTH:
-                console.print(f"[bold red]Message from {username} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
+                console.print(f"[bold red]Message from {safe_username} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
                 break
 
     finally:
@@ -183,7 +209,7 @@ def handle_client(client_socket, address):
         except OSError:
             pass
         connection_slots.release()
-        console.print(f"[bold yellow]Connection from {address} ({username}) closed.[/bold yellow]")
+        console.print(f"[bold yellow]Connection from {address} ({safe_username}) closed.[/bold yellow]")
         broadcast(f"[{username}] has left the chat.")
 
 def main():

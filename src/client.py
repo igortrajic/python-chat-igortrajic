@@ -78,12 +78,20 @@ def main():
             client_socket.close()
             sys.exit(1)
 
-        if response == "USERNAME_OK":
+        if response.startswith("USERNAME_OK:"):
+            accepted_username = response.split(":", 1)[1]
+            if accepted_username != username:
+                # Should not happen (the server rejects names it can't
+                # register as-is), but don't let the display silently
+                # diverge from what the server actually registered.
+                print(f"You are registered as '{accepted_username}'.")
             break
-        elif response.startswith("USERNAME_TAKEN:"):
+        elif response.startswith("USERNAME_TAKEN:") or response.startswith("USERNAME_INVALID:"):
             print(response.split(":", 1)[1])
         else:
-            break
+            print(f"Unexpected response from server: {response}")
+            client_socket.close()
+            sys.exit(1)
 
     receive_thread = threading.Thread(target=receive_messages, args=(client_socket, decoder, buffer), daemon=True)
     receive_thread.start()
