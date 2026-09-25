@@ -15,10 +15,10 @@ connection_slots = threading.Semaphore(MAX_CONNECTIONS)
 clients_lock = threading.Lock()
 clients = set()
 
-def broadcast(message):
+def broadcast(message, exclude=None):
     data = message.encode('utf-8')
     with clients_lock:
-        targets = list(clients)
+        targets = [sock for sock in clients if sock is not exclude]
     for sock in targets:
         try:
             sock.sendall(data)
@@ -30,6 +30,7 @@ def handle_client(client_socket, address):
     client_socket.settimeout(IDLE_TIMEOUT)
     with clients_lock:
         clients.add(client_socket)
+    broadcast(f"{address} has joined the chat.", exclude=client_socket)
     decoder = codecs.getincrementaldecoder('utf-8')()
     try:
         while True:
@@ -49,7 +50,7 @@ def handle_client(client_socket, address):
             if not message:
                 continue
             console.print(f"{address}: {escape(message)}")
-            broadcast(f"{address}: {message}")
+            broadcast(f"{address}: {message}", exclude=client_socket)
 
     finally:
         with clients_lock:
@@ -57,6 +58,7 @@ def handle_client(client_socket, address):
         client_socket.close()
         connection_slots.release()
         console.print(f"[bold yellow]Connection from {address} closed.[/bold yellow]")
+        broadcast(f"{address} has left the chat.")
 
 def main():
 
