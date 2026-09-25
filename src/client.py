@@ -4,10 +4,14 @@ import codecs
 import argparse
 import sys
 
-def receive_messages(client_socket):
+def receive_messages(client_socket, decoder=None, buffer=""):
     """Listens for incoming messages from the server."""
-    decoder = codecs.getincrementaldecoder('utf-8')()
-    buffer = ""
+    if decoder is None:
+        decoder = codecs.getincrementaldecoder('utf-8')()
+    while "\n" in buffer:
+        message, buffer = buffer.split("\n", 1)
+        if message:
+            print(message)
     while True:
         try:
             data = client_socket.recv(1024)
@@ -42,7 +46,54 @@ def main():
         print(f"Error: Could not connect to {args.host}:{args.port} ({e})")
         sys.exit(1)
 
-    receive_thread = threading.Thread(target=receive_messages, args=(client_socket,), daemon=True)
+    decoder = codecs.getincrementaldecoder('utf-8')()
+    buffer = ""
+
+    def recv_line():
+        nonlocal buffer
+        while "\n" not in buffer:
+            data = client_socket.recv(1024)
+            if not data:
+                raise ConnectionError("Connection closed by the server.")
+            buffer += decoder.decode(data)
+        line, buffer = buffer.split("\n", 1)
+        return line
+
+    while True:
+        username = ""
+        while not username:
+            try:
+                username = input("Enter your username: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                client_socket.close()
+                sys.exit(0)
+            if not username:
+                print("Username cannot be empty.")
+
+        try:
+            client_socket.sendall((username + "\n").encode('utf-8'))
+            response = recv_line()
+        except (OSError, ConnectionError) as e:
+            print(f"Error: Could not negotiate username ({e})")
+            client_socket.close()
+            sys.exit(1)
+
+        if response.startswith("USERNAME_OK:"):
+            accepted_username = response.split(":", 1)[1]
+            if accepted_username != username:
+                # Should not happen (the server rejects names it can't
+                # register as-is), but don't let the display silently
+                # diverge from what the server actually registered.
+                print(f"You are registered as '{accepted_username}'.")
+            break
+        elif response.startswith("USERNAME_TAKEN:") or response.startswith("USERNAME_INVALID:"):
+            print(response.split(":", 1)[1])
+        else:
+            print(f"Unexpected response from server: {response}")
+            client_socket.close()
+            sys.exit(1)
+
+    receive_thread = threading.Thread(target=receive_messages, args=(client_socket, decoder, buffer), daemon=True)
     receive_thread.start()
 
     try:
