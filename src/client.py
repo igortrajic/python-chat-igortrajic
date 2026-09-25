@@ -1,21 +1,26 @@
 import socket
 import threading
+import codecs
 import argparse
 import sys
 
 def receive_messages(client_socket):
     """Listens for incoming messages from the server."""
+    decoder = codecs.getincrementaldecoder('utf-8')()
     while True:
         try:
-            message = client_socket.recv(1024).decode('utf-8')
-            if not message:
+            data = client_socket.recv(1024)
+            if not data:
                 print("Connection closed by the server.")
                 break
-            print(message)
+            message = decoder.decode(data)
+            if message:
+                print(message)
         except ConnectionError:
             print("Connection to the server was lost.")
             break
-        except Exception:
+        except Exception as e:
+            print(f"Error receiving message: {e}")
             break
 
     client_socket.close()
@@ -43,7 +48,7 @@ def main():
             if not message:
                 continue
             client_socket.sendall(message.encode('utf-8'))
-    except (KeyboardInterrupt, EOFError):
+    except (KeyboardInterrupt, EOFError, OSError):
         pass
     finally:
         client_socket.close()
