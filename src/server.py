@@ -12,9 +12,24 @@ IDLE_TIMEOUT = 300
 
 connection_slots = threading.Semaphore(MAX_CONNECTIONS)
 
+clients_lock = threading.Lock()
+clients = set()
+
+def broadcast(message):
+    data = message.encode('utf-8')
+    with clients_lock:
+        targets = list(clients)
+    for sock in targets:
+        try:
+            sock.sendall(data)
+        except OSError:
+            pass
+
 def handle_client(client_socket, address):
     console.print(f"[bold green]New connection established from {address}[/bold green]")
     client_socket.settimeout(IDLE_TIMEOUT)
+    with clients_lock:
+        clients.add(client_socket)
     decoder = codecs.getincrementaldecoder('utf-8')()
     try:
         while True:
@@ -34,8 +49,11 @@ def handle_client(client_socket, address):
             if not message:
                 continue
             console.print(f"{address}: {escape(message)}")
+            broadcast(f"{address}: {message}")
 
     finally:
+        with clients_lock:
+            clients.discard(client_socket)
         client_socket.close()
         connection_slots.release()
         console.print(f"[bold yellow]Connection from {address} closed.[/bold yellow]")
