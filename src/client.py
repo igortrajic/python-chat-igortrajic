@@ -14,6 +14,47 @@ CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ud800-\udfff]')
 def sanitize(text):
     return CONTROL_CHARS_RE.sub('', text)
 
+def _clean(value):
+    """Sanitized string, or None if it isn't a string or is empty after sanitizing."""
+    if not isinstance(value, str):
+        return None
+    return sanitize(value) or None
+
+def _render_chat(payload):
+    sender, text = _clean(payload.get("sender")), _clean(payload.get("text"))
+    if sender and text:
+        return f"[{sender}]: {text}"
+
+def _render_join(payload):
+    username = _clean(payload.get("username"))
+    if username:
+        return f"[{username}] has joined the chat."
+
+def _render_leave(payload):
+    username = _clean(payload.get("username"))
+    if username:
+        return f"[{username}] has left the chat."
+
+def _render_error(payload):
+    reason = _clean(payload.get("reason"))
+    if reason:
+        return f"[error] {reason}"
+
+SYSTEM_RENDERERS = {"join": _render_join, "leave": _render_leave, "error": _render_error}
+
+def _render(message):
+    """Display text for a decoded message, or None if it can't be rendered confidently."""
+    payload = message["payload"]
+    if not isinstance(payload, dict):
+        return None
+    if message["type"] == protocol.TYPE_CHAT:
+        return _render_chat(payload)
+    if message["type"] == protocol.TYPE_SYSTEM:
+        event = payload.get("event")
+        renderer = SYSTEM_RENDERERS.get(event) if isinstance(event, str) else None
+        return renderer(payload) if renderer else None
+    return None
+
 def _format_incoming(line):
     try:
         message = protocol.decode(line)
@@ -21,29 +62,10 @@ def _format_incoming(line):
         logger.warning("Unrecognized message from server, ignoring: %s", e)
         return None
 
-    payload = message["payload"]
-    msg_type = message["type"]
-
-    if isinstance(payload, dict):
-        if msg_type == protocol.TYPE_CHAT:
-            sender, text = payload.get("sender"), payload.get("text")
-            if isinstance(sender, str) and isinstance(text, str):
-                sender, text = sanitize(sender), sanitize(text)
-                if sender and text:
-                    return f"[{sender}]: {text}"
-        elif msg_type == protocol.TYPE_SYSTEM:
-            event, username = payload.get("event"), payload.get("username")
-            if event in ("join", "leave") and isinstance(username, str):
-                username = sanitize(username)
-                if username:
-                    return f"[{username}] has {'joined' if event == 'join' else 'left'} the chat."
-            elif event == "error" and isinstance(payload.get("reason"), str):
-                reason = sanitize(payload["reason"])
-                if reason:
-                    return f"[error] {reason}"
-
-    logger.warning("Unrecognized message from server, ignoring: %r", message)
-    return None
+    text = _render(message)
+    if text is None:
+        logger.warning("Unrecognized message from server, ignoring: %r", message)
+    return text
 
 def _display(line):
     text = _format_incoming(line)
