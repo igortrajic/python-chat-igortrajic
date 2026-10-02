@@ -3,6 +3,74 @@ import threading
 import codecs
 import argparse
 import sys
+import re
+import logging
+import protocol
+
+logger = logging.getLogger("chat.client")
+
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ud800-\udfff]')
+
+def sanitize(text):
+    return CONTROL_CHARS_RE.sub('', text)
+
+def _clean(value):
+    """Sanitized string, or None if it isn't a string or is empty after sanitizing."""
+    if not isinstance(value, str):
+        return None
+    return sanitize(value) or None
+
+def _render_chat(payload):
+    sender, text = _clean(payload.get("sender")), _clean(payload.get("text"))
+    if sender and text:
+        return f"[{sender}]: {text}"
+
+def _render_join(payload):
+    username = _clean(payload.get("username"))
+    if username:
+        return f"[{username}] has joined the chat."
+
+def _render_leave(payload):
+    username = _clean(payload.get("username"))
+    if username:
+        return f"[{username}] has left the chat."
+
+def _render_error(payload):
+    reason = _clean(payload.get("reason"))
+    if reason:
+        return f"[error] {reason}"
+
+SYSTEM_RENDERERS = {"join": _render_join, "leave": _render_leave, "error": _render_error}
+
+def _render(message):
+    """Display text for a decoded message, or None if it can't be rendered confidently."""
+    payload = message["payload"]
+    if not isinstance(payload, dict):
+        return None
+    if message["type"] == protocol.TYPE_CHAT:
+        return _render_chat(payload)
+    if message["type"] == protocol.TYPE_SYSTEM:
+        event = payload.get("event")
+        renderer = SYSTEM_RENDERERS.get(event) if isinstance(event, str) else None
+        return renderer(payload) if renderer else None
+    return None
+
+def _format_incoming(line):
+    try:
+        message = protocol.decode(line)
+    except protocol.ProtocolError as e:
+        logger.warning("Unrecognized message from server, ignoring: %s", e)
+        return None
+
+    text = _render(message)
+    if text is None:
+        logger.warning("Unrecognized message from server, ignoring: %r", message)
+    return text
+
+def _display(line):
+    text = _format_incoming(line)
+    if text is not None:
+        print(text)
 
 def receive_messages(client_socket, decoder=None, buffer=""):
     """Listens for incoming messages from the server."""
@@ -11,7 +79,7 @@ def receive_messages(client_socket, decoder=None, buffer=""):
     while "\n" in buffer:
         message, buffer = buffer.split("\n", 1)
         if message:
-            print(message)
+            _display(message)
     while True:
         try:
             data = client_socket.recv(1024)
@@ -22,7 +90,7 @@ def receive_messages(client_socket, decoder=None, buffer=""):
             while "\n" in buffer:
                 message, buffer = buffer.split("\n", 1)
                 if message:
-                    print(message)
+                    _display(message)
         except ConnectionError:
             print("Connection to the server was lost.")
             break
@@ -71,23 +139,35 @@ def main():
                 print("Username cannot be empty.")
 
         try:
-            client_socket.sendall((username + "\n").encode('utf-8'))
+            client_socket.sendall(protocol.encode(protocol.make_system("join", username=username)).encode('utf-8'))
             response = recv_line()
         except (OSError, ConnectionError) as e:
             print(f"Error: Could not negotiate username ({e})")
             client_socket.close()
             sys.exit(1)
 
-        if response.startswith("USERNAME_OK:"):
-            accepted_username = response.split(":", 1)[1]
+        try:
+            message = protocol.decode(response)
+        except protocol.ProtocolError as e:
+            print(f"Error: Received a malformed response from the server ({e})")
+            client_socket.close()
+            sys.exit(1)
+
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        event = payload.get("event") if message.get("type") == protocol.TYPE_SYSTEM else None
+
+        if event == "join_ok":
+            accepted_username = payload.get("username")
             if accepted_username != username:
                 # Should not happen (the server rejects names it can't
                 # register as-is), but don't let the display silently
                 # diverge from what the server actually registered.
                 print(f"You are registered as '{accepted_username}'.")
             break
-        elif response.startswith("USERNAME_TAKEN:") or response.startswith("USERNAME_INVALID:"):
-            print(response.split(":", 1)[1])
+        elif event in ("join_taken", "join_invalid"):
+            print(payload.get("reason", "Username rejected."))
         else:
             print(f"Unexpected response from server: {response}")
             client_socket.close()
@@ -101,7 +181,7 @@ def main():
             message = input()
             if not message:
                 continue
-            client_socket.sendall((message + "\n").encode('utf-8'))
+            client_socket.sendall(protocol.encode(protocol.make_chat_request(message)).encode('utf-8'))
     except (KeyboardInterrupt, EOFError, OSError):
         pass
     finally:
