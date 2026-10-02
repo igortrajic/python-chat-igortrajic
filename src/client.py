@@ -6,8 +6,12 @@ import sys
 import re
 import logging
 import protocol
+from typing import Callable, NamedTuple
 
 logger = logging.getLogger("chat.client")
+
+QUIT_TIMEOUT = 5
+quitting = threading.Event()
 
 CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ud800-\udfff]')
 
@@ -40,7 +44,19 @@ def _render_error(payload):
     if reason:
         return f"[error] {reason}"
 
-SYSTEM_RENDERERS = {"join": _render_join, "leave": _render_leave, "error": _render_error}
+def _render_nick(payload):
+    old, new = _clean(payload.get("old")), _clean(payload.get("new"))
+    if old and new:
+        return f"[{old}] is now known as [{new}]."
+
+def _render_users(payload):
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return None
+    names = [name for name in map(_clean, users) if name]
+    return f"Connected users ({len(names)}): {', '.join(names)}"
+
+SYSTEM_RENDERERS = {"join": _render_join, "leave": _render_leave, "error": _render_error, "users": _render_users, "nick": _render_nick}
 
 def _render(message):
     """Display text for a decoded message, or None if it can't be rendered confidently."""
@@ -72,8 +88,61 @@ def _display(line):
     if text is not None:
         print(text)
 
+class Command(NamedTuple):
+    handler: Callable[[socket.socket, str], bool]
+    usage: str
+    description: str
+
+def cmd_help(client_socket, arg):
+    width = max(len(command.usage) for command in COMMANDS.values())
+    print("Available commands:")
+    for command in COMMANDS.values():
+        print(f"  {command.usage:<{width}}  {command.description}")
+    return True
+
+def begin_quit(client_socket):
+    quitting.set()
+    try:
+        client_socket.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+def cmd_quit(client_socket, arg):
+    print("Disconnecting...")
+    begin_quit(client_socket)
+    return False
+
+def cmd_users(client_socket, arg):
+    client_socket.sendall(protocol.encode(protocol.make_command("users")).encode('utf-8'))
+    return True
+
+def cmd_nick(client_socket, arg):
+    if not arg:
+        print("[error] Usage: /nick <new_name>")
+        return True
+    client_socket.sendall(protocol.encode(protocol.make_command("nick", [arg])).encode('utf-8'))
+    return True
+
+COMMANDS: dict[str, Command] = {
+    "help": Command(cmd_help, "/help", "Show this list of commands"),
+    "users": Command(cmd_users, "/users", "List connected users"),
+    "nick": Command(cmd_nick, "/nick <new_name>", "Change your username"),
+    "quit": Command(cmd_quit, "/quit", "Disconnect from the server"),
+}
+
+def parse_command(line):
+    name, _, arg = line[1:].partition(" ")
+    return name.lower(), arg.strip()
+
+def handle_command(client_socket, line):
+    name, arg = parse_command(line)
+    command = COMMANDS.get(name)
+    if command is None:
+        print(f"[error] Unknown command '/{name}'. Type /help for a list of commands.")
+        return True
+    return command.handler(client_socket, arg)
+
 def receive_messages(client_socket, decoder=None, buffer=""):
-    """Listens for incoming messages from the server."""
     if decoder is None:
         decoder = codecs.getincrementaldecoder('utf-8')()
     while "\n" in buffer:
@@ -84,7 +153,7 @@ def receive_messages(client_socket, decoder=None, buffer=""):
         try:
             data = client_socket.recv(1024)
             if not data:
-                print("Connection closed by the server.")
+                print("Disconnected." if quitting.is_set() else "Connection closed by the server.")
                 break
             buffer += decoder.decode(data)
             while "\n" in buffer:
@@ -92,10 +161,11 @@ def receive_messages(client_socket, decoder=None, buffer=""):
                 if message:
                     _display(message)
         except ConnectionError:
-            print("Connection to the server was lost.")
+            print("Disconnected." if quitting.is_set() else "Connection to the server was lost.")
             break
         except Exception as e:
-            print(f"Error receiving message: {e}")
+            if not quitting.is_set():
+                print(f"Error receiving message: {e}")
             break
 
     client_socket.close()
@@ -181,10 +251,18 @@ def main():
             message = input()
             if not message:
                 continue
+            if message.startswith("/"):
+                if not handle_command(client_socket, message):
+                    break
+                continue
             client_socket.sendall(protocol.encode(protocol.make_chat_request(message)).encode('utf-8'))
-    except (KeyboardInterrupt, EOFError, OSError):
+    except (KeyboardInterrupt, EOFError):
+        begin_quit(client_socket)
+    except OSError:
         pass
     finally:
+        if quitting.is_set():
+            receive_thread.join(timeout=QUIT_TIMEOUT)
         client_socket.close()
 
 if __name__ == "__main__":

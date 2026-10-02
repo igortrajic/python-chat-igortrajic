@@ -44,3 +44,6 @@ def make_chat_request(text: str) -> dict:
 
 def make_system(event: str, **fields) -> dict:
     return {"type": TYPE_SYSTEM, "payload": {"event": event, **fields}}
+
+def make_command(name: str, args: list[str] | None = None) -> dict:
+    return {"type": TYPE_COMMAND, "payload": {"name": name, "args": list(args or [])}}
