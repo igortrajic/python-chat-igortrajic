@@ -19,7 +19,7 @@ MAX_QUEUE_SIZE = 100
 MAX_USERNAME_LENGTH = 32
 USERNAME_TIMEOUT = 30
 
-CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ud800-\udfff]')
 
 def sanitize(text):
     return CONTROL_CHARS_RE.sub('', text)
@@ -166,13 +166,19 @@ def handle_client(client_socket, address):
 
     out_queue = queue.Queue(maxsize=MAX_QUEUE_SIZE)
     decoder = codecs.getincrementaldecoder('utf-8')()
-    username, buffer = read_username(client_socket, address, decoder, out_queue)
+    username = None
+    try:
+        username, buffer = read_username(client_socket, address, decoder, out_queue)
+    finally:
+        if username is None:
+            with clients_lock:
+                clients.pop(client_socket, None)
+            try:
+                client_socket.close()
+            except OSError:
+                pass
+            connection_slots.release()
     if username is None:
-        try:
-            client_socket.close()
-        except OSError:
-            pass
-        connection_slots.release()
         return
 
     safe_username = escape(username)

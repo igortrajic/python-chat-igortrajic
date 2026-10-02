@@ -9,7 +9,7 @@ import protocol
 
 logger = logging.getLogger("chat.client")
 
-CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\ud800-\udfff]')
 
 def sanitize(text):
     return CONTROL_CHARS_RE.sub('', text)
