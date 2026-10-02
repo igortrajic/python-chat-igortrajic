@@ -19,7 +19,7 @@ MAX_QUEUE_SIZE = 100
 MAX_USERNAME_LENGTH = 32
 USERNAME_TIMEOUT = 30
 
-CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]')
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
 
 def sanitize(text):
     return CONTROL_CHARS_RE.sub('', text)
@@ -110,6 +110,7 @@ def read_username(client_socket, address, decoder, out_queue):
         username_field = payload.get("username") if isinstance(payload, dict) else None
         if (
             message.get("type") != protocol.TYPE_SYSTEM
+            or not isinstance(payload, dict)
             or payload.get("event") != "join"
             or not isinstance(username_field, str)
         ):

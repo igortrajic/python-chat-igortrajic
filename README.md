@@ -91,23 +91,38 @@ field plus event-specific fields (built with `protocol.make_system(event,
 | `join`         | client → server | `username`               | Request to register a username (the handshake).       |
 | `join_ok`      | server → client | `username`               | Handshake succeeded; `username` is now registered.    |
 | `join_taken`   | server → client | `reason`                 | Handshake failed: username already in use.             |
-| `join_invalid` | server → client | `reason`                 | Handshake failed: empty, contains control characters, or too long. |
+| `join_invalid` | server → client | `reason`                 | Handshake failed: empty, contains control characters, too long, or the line was malformed or not a `join` request. |
 | `join`         | server → all    | `username`               | Broadcast: a client has joined the chat.               |
 | `leave`        | server → all    | `username`               | Broadcast: a client has disconnected.                  |
-| `error`        | server → client | `reason`                 | The server received a malformed or unexpected message from this client (see below). |
+| `error`        | server → client | `reason`                 | After the handshake: the server received a malformed or unexpected message from this client (see "Errors after joining"). |
 
 **`command`** — reserved for client commands. The message shape
 (`{"type": "command", "payload": {...}}`) is defined, but no command is
 parsed or acted on yet.
 
-### Invalid and malformed messages
+### Handshake
 
-Any line that isn't valid JSON, isn't a JSON object, is missing `type` or
-`payload`, or doesn't match the expected shape for its type/event is
-handled gracefully rather than crashing the connection:
+The first message on a connection must be a `join` request. The server
+replies with `join_ok`, `join_taken` or `join_invalid` (the last two carry a
+`reason`). After `join_taken` or `join_invalid` the connection stays open and
+the client may retry with another `join`.
 
-- The **server** logs the malformed line to its console, sends the
-  offending client a `system`/`error` message explaining why, and drops
-  just that line — the connection stays open for the next message.
-- The **client** logs a warning and silently drops the line, leaving the
-  rest of the session unaffected.
+**Any** invalid line during the handshake — malformed JSON, a non-object
+payload, the wrong type or event, a missing or non-string `username` — gets
+`join_invalid`, never `error`.
+
+The server closes the connection without a reply if the handshake takes
+longer than 30 seconds, the data isn't valid UTF-8, or a line exceeds 4096
+characters without a newline.
+
+### Errors after joining
+
+After `join_ok`, a line that isn't valid JSON, isn't a JSON object, is
+missing `type` or `payload`, or isn't a `chat` message with a `text` string
+is handled gracefully rather than crashing the connection:
+
+- The **server** logs the line to its console, sends the offending client a
+  `system`/`error` message with a `reason`, and drops just that line — the
+  connection stays open for the next message.
+- The **client** logs a warning (to stderr) and drops any line it can't
+  render, leaving the rest of the session unaffected.

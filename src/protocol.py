@@ -10,7 +10,9 @@ class ProtocolError(ValueError):
 
 
 def encode(message: dict) -> str:
-    return json.dumps(message) + "\n"
+    # ensure_ascii=False keeps non-ASCII text as-is (UTF-8 on the wire) instead
+    # of \uXXXX escapes, which would expand e.g. an emoji from 1 char to 12.
+    return json.dumps(message, ensure_ascii=False) + "\n"
 
 
 def decode(line: str) -> dict:
