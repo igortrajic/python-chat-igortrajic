@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from rich.console import Console
 from rich.markup import escape
 import argparse
+import protocol
 
 console = Console()
 
@@ -53,7 +54,7 @@ def writer_loop(client_socket, address, out_queue, stop_event):
         except queue.Empty:
             continue
         try:
-            client_socket.sendall((message + "\n").encode('utf-8'))
+            client_socket.sendall(message.encode('utf-8'))
         except (OSError, socket.timeout):
             console.print(f"[bold red]Failed to deliver message to {address}, dropping connection.[/bold red]")
             stop_event.set()
@@ -62,6 +63,13 @@ def writer_loop(client_socket, address, out_queue, stop_event):
             except OSError:
                 pass
             break
+
+def _send_system(client_socket, event, **fields):
+    try:
+        client_socket.sendall(protocol.encode(protocol.make_system(event, **fields)).encode('utf-8'))
+        return True
+    except OSError:
+        return False
 
 def read_username(client_socket, address, decoder, out_queue):
     buffer = ""
@@ -88,8 +96,29 @@ def read_username(client_socket, address, decoder, out_queue):
                 return None, buffer
             elapsed = 0
 
-        raw_username, buffer = buffer.split("\n", 1)
-        entered = raw_username.strip()
+        raw_line, buffer = buffer.split("\n", 1)
+
+        try:
+            message = protocol.decode(raw_line)
+        except protocol.ProtocolError as e:
+            console.print(f"[bold red]Malformed handshake message from {address}, ignoring: {e}[/bold red]")
+            if not _send_system(client_socket, "join_invalid", reason="Malformed message: expected a JSON join request."):
+                return None, buffer
+            continue
+
+        payload = message.get("payload") or {}
+        username_field = payload.get("username") if isinstance(payload, dict) else None
+        if (
+            message.get("type") != protocol.TYPE_SYSTEM
+            or payload.get("event") != "join"
+            or not isinstance(username_field, str)
+        ):
+            console.print(f"[bold red]Unexpected handshake message from {address}, ignoring: {escape(repr(message))}[/bold red]")
+            if not _send_system(client_socket, "join_invalid", reason="Expected a 'join' system message with a 'username' field."):
+                return None, buffer
+            continue
+
+        entered = username_field.strip()
         sanitized = sanitize(entered)
 
         rejection = None
@@ -101,9 +130,7 @@ def read_username(client_socket, address, decoder, out_queue):
             rejection = f"Username must be at most {MAX_USERNAME_LENGTH} characters."
 
         if rejection is not None:
-            try:
-                client_socket.sendall(f"USERNAME_INVALID:{rejection}\n".encode('utf-8'))
-            except OSError:
+            if not _send_system(client_socket, "join_invalid", reason=rejection):
                 return None, buffer
             continue
 
@@ -117,17 +144,15 @@ def read_username(client_socket, address, decoder, out_queue):
                 clients[client_socket] = ClientInfo(username=requested, queue=out_queue)
 
         if taken:
-            try:
-                client_socket.sendall(
-                    f"USERNAME_TAKEN:'{requested}' is already taken. Please choose a different username.\n".encode('utf-8')
-                )
-            except OSError:
+            if not _send_system(
+                client_socket,
+                "join_taken",
+                reason=f"'{requested}' is already taken. Please choose a different username.",
+            ):
                 return None, buffer
             continue
 
-        try:
-            client_socket.sendall(f"USERNAME_OK:{requested}\n".encode('utf-8'))
-        except OSError:
+        if not _send_system(client_socket, "join_ok", username=requested):
             with clients_lock:
                 clients.pop(client_socket, None)
             return None, buffer
@@ -154,7 +179,7 @@ def handle_client(client_socket, address):
     stop_event = threading.Event()
     try:
         console.print(f"[bold cyan]{address} identified as '{safe_username}'[/bold cyan]")
-        broadcast(f"[{username}] has joined the chat.", exclude=client_socket)
+        broadcast(protocol.encode(protocol.make_system("join", username=username)), exclude=client_socket)
 
         writer = threading.Thread(
             target=writer_loop,
@@ -164,11 +189,8 @@ def handle_client(client_socket, address):
         writer.start()
 
         while "\n" in buffer:
-            message, buffer = buffer.split("\n", 1)
-            message = sanitize(message)
-            if message:
-                console.print(f"[{safe_username}]: {escape(message)}")
-                broadcast(f"[{username}]: {message}", exclude=client_socket)
+            raw_line, buffer = buffer.split("\n", 1)
+            _handle_chat_line(client_socket, username, safe_username, raw_line)
 
         idle_elapsed = 0
         while not stop_event.is_set():
@@ -188,14 +210,10 @@ def handle_client(client_socket, address):
             try:
                 buffer += decoder.decode(data)
             except UnicodeDecodeError:
-                break
+                break 
             while "\n" in buffer:
-                message, buffer = buffer.split("\n", 1)
-                message = sanitize(message)
-                if not message:
-                    continue
-                console.print(f"[{safe_username}]: {escape(message)}")
-                broadcast(f"[{username}]: {message}", exclude=client_socket)
+                raw_line, buffer = buffer.split("\n", 1)
+                _handle_chat_line(client_socket, username, safe_username, raw_line)
             if len(buffer) > MAX_LINE_LENGTH:
                 console.print(f"[bold red]Message from {safe_username} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
                 break
@@ -210,7 +228,40 @@ def handle_client(client_socket, address):
             pass
         connection_slots.release()
         console.print(f"[bold yellow]Connection from {address} ({safe_username}) closed.[/bold yellow]")
-        broadcast(f"[{username}] has left the chat.")
+        broadcast(protocol.encode(protocol.make_system("leave", username=username)))
+
+def _send_error(client_socket, reason):
+
+    with clients_lock:
+        info = clients.get(client_socket)
+    if info is None:
+        return
+    try:
+        info.queue.put_nowait(protocol.encode(protocol.make_system("error", reason=reason)))
+    except queue.Full:
+        pass
+
+def _handle_chat_line(client_socket, username, safe_username, raw_line):
+    try:
+        parsed = protocol.decode(raw_line)
+    except protocol.ProtocolError as e:
+        console.print(f"[bold red]Malformed message from {safe_username}, ignoring: {e}[/bold red]")
+        _send_error(client_socket, "Malformed message: expected a JSON object with 'type' and 'payload'.")
+        return
+    
+    payload = parsed.get("payload") or {}
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if parsed.get("type") != protocol.TYPE_CHAT or not isinstance(text, str):
+        console.print(f"[bold red]Unexpected message from {safe_username}, ignoring: {escape(repr(parsed))}[/bold red]")
+        _send_error(client_socket, "Expected a 'chat' message with a 'text' field.")
+        return
+
+    text = sanitize(text)
+    if not text:
+        return
+
+    console.print(f"[{safe_username}]: {escape(text)}")
+    broadcast(protocol.encode(protocol.make_chat(username, text)), exclude=client_socket)
 
 def main():
 
