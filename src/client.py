@@ -251,7 +251,9 @@ def main():
             message = input()
             if not message:
                 continue
-            if message.startswith("/"):
+            if message.startswith("//"):
+                message = message[1:]
+            elif message.startswith("/"):
                 if not handle_command(client_socket, message):
                     break
                 continue

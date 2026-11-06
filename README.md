@@ -94,11 +94,31 @@ field plus event-specific fields (built with `protocol.make_system(event,
 | `join_invalid` | server → client | `reason`                 | Handshake failed: empty, contains control characters, too long, or the line was malformed or not a `join` request. |
 | `join`         | server → all    | `username`               | Broadcast: a client has joined the chat.               |
 | `leave`        | server → all    | `username`               | Broadcast: a client has disconnected.                  |
-| `error`        | server → client | `reason`                 | After the handshake: the server received a malformed or unexpected message from this client (see "Errors after joining"). |
+| `users`        | server → client | `users` (list of strings) | Reply to the `users` command: sorted usernames of everyone connected. |
+| `nick`         | server → all    | `old`, `new`             | Broadcast: a client changed its username (also sent to the requester as confirmation). |
+| `error`        | server → client | `reason`                 | After the handshake: a malformed or unexpected message, an unknown or malformed command, or a rejected command such as `nick` (see "Errors after joining"). |
 
-**`command`** — reserved for client commands. The message shape
-(`{"type": "command", "payload": {...}}`) is defined, but no command is
-parsed or acted on yet.
+**`command`** — client → server request for an action, sent after the
+handshake (built with `protocol.make_command(name, args)`). The payload has a
+`name` string and an `args` list of strings:
+
+```json
+{"type": "command", "payload": {"name": "nick", "args": ["bob"]}}
+```
+
+| Command | Args         | Server behavior                                                                 |
+|---------|--------------|---------------------------------------------------------------------------------|
+| `users` | none         | Replies to the sender with a `system`/`users` message.                          |
+| `nick`  | `[new_name]` | Renames the sender if `new_name` is valid (same rules as at the handshake), differs from the current name and is not taken, then broadcasts `system`/`nick` to all. Otherwise replies to the sender with `error`. |
+
+An unknown `name`, or `args` that is not a list of strings, gets an `error`
+reply; nothing is broadcast.
+
+Commands are a client-side concept first: the CLI client treats any input
+starting with `/` as a command (`/help` and `/quit` are handled locally and
+send nothing; `/users` and `/nick <name>` send the messages above). A line
+starting with `//` is sent as a normal chat message with one slash removed, so
+`//shrug` sends `/shrug`.
 
 ### Handshake
 
@@ -118,8 +138,8 @@ characters without a newline.
 ### Errors after joining
 
 After `join_ok`, a line that isn't valid JSON, isn't a JSON object, is
-missing `type` or `payload`, or isn't a `chat` message with a `text` string
-is handled gracefully rather than crashing the connection:
+missing `type` or `payload`, or is neither a `command` nor a `chat` message
+with a `text` string is handled gracefully rather than crashing the connection:
 
 - The **server** logs the line to its console, sends the offending client a
   `system`/`error` message with a `reason`, and drops just that line — the
