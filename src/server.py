@@ -30,7 +30,7 @@ connection_slots = threading.Semaphore(MAX_CONNECTIONS)
 class ClientInfo:
     username: str
     queue: "queue.Queue"
-    
+
 clients_lock = threading.Lock()
 clients: dict[socket.socket, ClientInfo] = {}
 
@@ -70,6 +70,15 @@ def _send_system(client_socket, event, **fields):
         return True
     except OSError:
         return False
+
+def _validate_username(name):
+    if not name:
+        return "Username cannot be empty."
+    if sanitize(name) != name:
+        return "Username contains disallowed control characters."
+    if len(name) > MAX_USERNAME_LENGTH:
+        return f"Username must be at most {MAX_USERNAME_LENGTH} characters."
+    return None
 
 def read_username(client_socket, address, decoder, out_queue):
     buffer = ""
@@ -120,24 +129,16 @@ def read_username(client_socket, address, decoder, out_queue):
             continue
 
         entered = username_field.strip()
-        sanitized = sanitize(entered)
-
-        rejection = None
-        if not entered:
-            rejection = "Username cannot be empty."
-        elif sanitized != entered:
-            rejection = "Username contains disallowed control characters."
-        elif len(sanitized) > MAX_USERNAME_LENGTH:
-            rejection = f"Username must be at most {MAX_USERNAME_LENGTH} characters."
+        rejection = _validate_username(entered)
 
         if rejection is not None:
             if not _send_system(client_socket, "join_invalid", reason=rejection):
                 return None, buffer
             continue
 
-        # sanitized == entered here, so registering it can't silently
-        # change the identity the client asked for.
-        requested = sanitized
+        # Validation guarantees the name has no control characters, so
+        # registering it can't silently change the identity the client asked for.
+        requested = entered
 
         with clients_lock:
             taken = any(info.username == requested for info in clients.values())
@@ -159,6 +160,12 @@ def read_username(client_socket, address, decoder, out_queue):
             return None, buffer
 
         return requested, buffer
+
+def _log_name(client_socket, fallback):
+    """Markup-safe current username (it can change via /nick), or the fallback."""
+    with clients_lock:
+        info = clients.get(client_socket)
+    return escape(info.username) if info is not None else fallback
 
 def handle_client(client_socket, address):
     console.print(f"[bold green]New connection established from {address}[/bold green]")
@@ -197,7 +204,7 @@ def handle_client(client_socket, address):
 
         while "\n" in buffer:
             raw_line, buffer = buffer.split("\n", 1)
-            _handle_chat_line(client_socket, username, safe_username, raw_line)
+            _handle_chat_line(client_socket, raw_line)
 
         idle_elapsed = 0
         while not stop_event.is_set():
@@ -206,7 +213,7 @@ def handle_client(client_socket, address):
             except socket.timeout:
                 idle_elapsed += SOCKET_TIMEOUT
                 if idle_elapsed >= IDLE_TIMEOUT:
-                    console.print(f"[bold yellow]Connection from {address} ({safe_username}) timed out (idle).[/bold yellow]")
+                    console.print(f"[bold yellow]Connection from {address} ({_log_name(client_socket, safe_username)}) timed out (idle).[/bold yellow]")
                     break
                 continue
             except (ConnectionError, OSError):
@@ -220,15 +227,18 @@ def handle_client(client_socket, address):
                 break 
             while "\n" in buffer:
                 raw_line, buffer = buffer.split("\n", 1)
-                _handle_chat_line(client_socket, username, safe_username, raw_line)
+                _handle_chat_line(client_socket, raw_line)
             if len(buffer) > MAX_LINE_LENGTH:
-                console.print(f"[bold red]Message from {safe_username} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
+                console.print(f"[bold red]Message from {_log_name(client_socket, safe_username)} exceeded {MAX_LINE_LENGTH} bytes without a newline, disconnecting.[/bold red]")
                 break
 
     finally:
         stop_event.set()
         with clients_lock:
-            clients.pop(client_socket, None)
+            info = clients.pop(client_socket, None)
+        if info is not None:
+            username = info.username
+            safe_username = escape(username)
         try:
             client_socket.close()
         except OSError:
@@ -238,25 +248,85 @@ def handle_client(client_socket, address):
         broadcast(protocol.encode(protocol.make_system("leave", username=username)))
 
 def _send_error(client_socket, reason):
+    _send_to(client_socket, protocol.make_system("error", reason=reason))
 
+def _send_to(client_socket, message):
     with clients_lock:
         info = clients.get(client_socket)
     if info is None:
         return
     try:
-        info.queue.put_nowait(protocol.encode(protocol.make_system("error", reason=reason)))
+        info.queue.put_nowait(protocol.encode(message))
     except queue.Full:
         pass
 
-def _handle_chat_line(client_socket, username, safe_username, raw_line):
+def _cmd_users(client_socket, args):
+    with clients_lock:
+        usernames = sorted(info.username for info in clients.values())
+    _send_to(client_socket, protocol.make_system("users", users=usernames))
+
+def _cmd_nick(client_socket, args):
+    if len(args) != 1:
+        _send_error(client_socket, "Usage: /nick <new_name>")
+        return
+    new_name = args[0].strip()
+    rejection = _validate_username(new_name)
+    if rejection is None:
+        with clients_lock:
+            info = clients.get(client_socket)
+            if info is None:
+                return
+            old_name = info.username
+            if new_name == old_name:
+                rejection = "That is already your username."
+            elif any(other.username == new_name for other in clients.values()):
+                rejection = f"'{new_name}' is already taken."
+            else:
+                info.username = new_name
+    if rejection is not None:
+        _send_error(client_socket, rejection)
+        return
+    console.print(f"[bold cyan]'{escape(old_name)}' is now known as '{escape(new_name)}'[/bold cyan]")
+    broadcast(protocol.encode(protocol.make_system("nick", old=old_name, new=new_name)))
+
+COMMAND_HANDLERS = {"users": _cmd_users, "nick": _cmd_nick}
+
+def _handle_command(client_socket, safe_username, payload):
+    if not isinstance(payload, dict):
+        payload = {}
+    name = payload.get("name")
+    args = payload.get("args")
+    handler = COMMAND_HANDLERS.get(name) if isinstance(name, str) else None
+    if handler is None:
+        console.print(f"[bold red]Unknown command from {safe_username}, ignoring: {escape(repr(payload))}[/bold red]")
+        _send_error(client_socket, "Unknown command.")
+        return
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        console.print(f"[bold red]Malformed command arguments from {safe_username}, ignoring: {escape(repr(payload))}[/bold red]")
+        _send_error(client_socket, "Malformed command arguments.")
+        return
+    handler(client_socket, args)
+
+def _handle_chat_line(client_socket, raw_line):
+    with clients_lock:
+        info = clients.get(client_socket)
+    if info is None:
+        return
+    username = info.username
+    safe_username = escape(username)
+
     try:
         parsed = protocol.decode(raw_line)
     except protocol.ProtocolError as e:
         console.print(f"[bold red]Malformed message from {safe_username}, ignoring: {e}[/bold red]")
         _send_error(client_socket, "Malformed message: expected a JSON object with 'type' and 'payload'.")
         return
-    
+
     payload = parsed.get("payload") or {}
+    if parsed.get("type") == protocol.TYPE_COMMAND:
+        _handle_command(client_socket, safe_username, payload)
+        return
+
     text = payload.get("text") if isinstance(payload, dict) else None
     if parsed.get("type") != protocol.TYPE_CHAT or not isinstance(text, str):
         console.print(f"[bold red]Unexpected message from {safe_username}, ignoring: {escape(repr(parsed))}[/bold red]")
